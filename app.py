@@ -49,7 +49,7 @@ import requests
 # ==========================================================
 # CONFIGURACIÓN
 # ==========================================================
-VERSION_APP = "6.0.0"
+VERSION_APP = "7.0.0"
 print(f"\n{'='*60}\nINCODARIEN Dashboard — VERSIÓN {VERSION_APP}\n"
       f"Si en el navegador no ves 'v{VERSION_APP}' en la esquina inferior "
       f"del dashboard, NO estás corriendo este archivo — revisa cuál "
@@ -65,11 +65,32 @@ CSV_LEADS_PRIVADOS = os.environ.get(
 
 DEPARTAMENTOS_OBJETIVO = ["Antioquia", "Cundinamarca", "Valle del Cauca", "Atlántico", "Bolívar", "Córdoba"]
 
+# Municipios principales por departamento del alcance. El criterio de
+# búsqueda en SECOP se limita a la ENTIDAD (alcaldías y concejos) de estos
+# municipios — no a todo el departamento — para mantener el volumen de
+# resultados relevante para el tamaño de INCODARIEN.
+MUNICIPIOS_PRINCIPALES = {
+    "Antioquia": ["Medellín", "Apartadó", "Turbo", "Rionegro", "Bello", "Itagüí", "Envigado", "Carepa", "Chigorodó", "Necoclí"],
+    "Cundinamarca": ["Bogotá D.C.", "Soacha", "Zipaquirá", "Facatativá", "Chía", "Girardot"],
+    "Valle del Cauca": ["Cali", "Buenaventura", "Palmira", "Tuluá", "Cartago"],
+    "Atlántico": ["Barranquilla", "Soledad", "Malambo", "Sabanalarga"],
+    "Bolívar": ["Cartagena", "Magangué", "Turbaco", "Arjona"],
+    "Córdoba": ["Montería", "Cereté", "Sahagún", "Lorica"],
+}
+TODOS_LOS_MUNICIPIOS_PRINCIPALES = [m for lista in MUNICIPIOS_PRINCIPALES.values() for m in lista]
+
+# Palabras clave de los servicios de INCODARIEN, usadas para filtrar la
+# descripción de cada proceso/mención encontrada.
 PALABRAS_CLAVE = [
-    "camara", "cámara", "cctv", "videovigilancia", "seguridad electronica", "seguridad electrónica",
-    "control de acceso", "telecomunicaciones", "fibra optica", "fibra óptica",
-    "red de datos", "redes", "energia solar", "energía solar", "energia renovable", "energía renovable",
-    "domo", "computo", "cómputo", "audiovisual", "tecnológic", "tecnologic",
+    "cctv", "camara", "cámara", "camaras", "cámaras", "camaras de seguridad", "cámaras de seguridad",
+    "videovigilancia", "control de acceso", "control del acceso",
+    "suministro electrico", "suministro eléctrico", "instalaciones electricas", "instalaciones eléctricas",
+    "telecomunicaciones", "fibra optica", "fibra óptica", "wifi", "wi-fi",
+    "enlaces inalambricos", "enlaces inalámbricos", "red de datos", "redes",
+    "adecuaciones para audiovisuales", "audiovisual", "audiovisuales",
+    "suministro de computadores", "suministro de servidores", "computadores y servidores",
+    "computo", "cómputo", "energia solar", "energía solar", "energia renovable", "energía renovable",
+    "domo", "tecnológic", "tecnologic",
 ]
 
 SECOP_ENDPOINT = "https://www.datos.gov.co/resource/p6dx-8zbt.json"
@@ -161,16 +182,93 @@ def calcular_score(descripcion, presupuesto_cop, dias_restantes):
 
 
 # ==========================================================
+# 2.5. TRM (dólar) — dataset oficial de Datos Abiertos Colombia
+# ==========================================================
+TRM_ENDPOINT = "https://www.datos.gov.co/resource/32sa-8pi3.json"
+
+
+def obtener_trm():
+    """Consulta la Tasa Representativa del Mercado (TRM) más reciente,
+    publicada oficialmente en Datos Abiertos Colombia (dataset de la
+    Superintendencia Financiera). Si la consulta falla, devuelve None en
+    vez de inventar un valor — el widget debe mostrar 'no disponible',
+    nunca un dólar ficticio."""
+    try:
+        params = {"$limit": 1, "$order": "vigenciahasta DESC"}
+        headers = {"X-App-Token": SOCRATA_APP_TOKEN} if SOCRATA_APP_TOKEN else {}
+        resp = requests.get(TRM_ENDPOINT, params=params, headers=headers, timeout=10)
+        resp.raise_for_status()
+        datos = resp.json()
+        if not datos:
+            return None
+        valor = float(datos[0].get("valor"))
+        vigencia = datos[0].get("vigenciahasta", "")[:10]
+        return {"valor": valor, "vigencia": vigencia}
+    except Exception as e:
+        print(f"[TRM] No se pudo consultar la TRM en este momento: {e}")
+        return None
+
+
+# ==========================================================
+# 2.6. BÚSQUEDA WEB DE MENCIONES PÚBLICAS (opcional — requiere API key)
+# ==========================================================
+def buscar_menciones_web(limite_terminos=8):
+    """Busca menciones públicas (noticias, portales de empresas) que
+    combinen 'Urabá'/departamentos del alcance con las palabras clave de
+    INCODARIEN, usando Google Custom Search. Requiere GOOGLE_CSE_API_KEY
+    y GOOGLE_CSE_CX; si no están definidas, se omite esta fuente por
+    completo (no es un error, es una fuente opcional)."""
+    api_key = os.environ.get("GOOGLE_CSE_API_KEY")
+    cx = os.environ.get("GOOGLE_CSE_CX")
+    if not api_key or not cx:
+        return pd.DataFrame(columns=COLUMNAS_ESTANDAR)
+
+    filas = []
+    terminos = PALABRAS_CLAVE[:limite_terminos]  # límite para no agotar la cuota diaria gratis
+    for termino in terminos:
+        try:
+            params = {"key": api_key, "cx": cx, "q": f"licitación {termino} Urabá Antioquia", "num": 3}
+            resp = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=10)
+            resp.raise_for_status()
+            items = resp.json().get("items", [])
+        except Exception as e:
+            print(f"[BUSQUEDA WEB] Falló la consulta para '{termino}': {e}")
+            continue
+
+        for item in items:
+            enlace = item.get("link", "")
+            filas.append({
+                "Empresa": item.get("displayLink", "Sitio web"),
+                "Sector": "Mención pública (búsqueda web)",
+                "Ubicación": "Urabá / Antioquia",
+                "Proyecto": item.get("title", "")[:180],
+                "Modalidad": "Mención en buscador",
+                "Fuente": "Búsqueda web (mención pública)",
+                "Presupuesto_COP": None,
+                "Fecha_Publicacion": datetime.now(),  # Google no siempre da fecha de publicación real
+                "Fecha_Cierre": None,
+                "Enlace_Proceso": enlace,
+                "Enlace_Verificado": verificar_enlace(enlace),
+                "Contacto": "Ver sitio web del enlace",
+                "Score_Relevancia": calcular_score(item.get("title", ""), None, None),
+            })
+    print(f"[BUSQUEDA WEB] {len(filas)} menciones encontradas en {len(terminos)} términos consultados.")
+    return pd.DataFrame(filas, columns=COLUMNAS_ESTANDAR) if filas else pd.DataFrame(columns=COLUMNAS_ESTANDAR)
+
+
+# ==========================================================
 # 3. SECOP II — consulta simple (sin LIKE, sin % que se pueda romper)
 # ==========================================================
 def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
-    """Filtra por departamento y fecha en el servidor (consulta simple y
-    robusta); el filtro de palabras clave se hace en Python sobre el
-    resultado, para no depender de escapar bien un patrón LIKE en SoQL."""
+    """Filtra por municipio (solo los municipios principales de cada
+    departamento del alcance) y por fecha en el servidor; el filtro de
+    palabras clave y de tipo de entidad (alcaldía/concejo) se hace en
+    Python sobre el resultado, para no depender de escapar bien comillas
+    con tildes dentro de un $where."""
     col = COLUMNAS_SECOP
     fecha_limite = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%dT00:00:00")
-    filtro_geo = " OR ".join([f"{col['departamento']} = '{d}'" for d in DEPARTAMENTOS_OBJETIVO])
-    where = f"({filtro_geo}) AND {col['fecha_publicacion']} >= '{fecha_limite}'"
+    filtro_municipios = " OR ".join([f"{col['municipio']} = '{m}'" for m in TODOS_LOS_MUNICIPIOS_PRINCIPALES])
+    where = f"({filtro_municipios}) AND {col['fecha_publicacion']} >= '{fecha_limite}'"
 
     params = {"$where": where, "$limit": limite, "$order": f"{col['fecha_publicacion']} DESC"}
     headers = {"X-App-Token": SOCRATA_APP_TOKEN} if SOCRATA_APP_TOKEN else {}
@@ -192,10 +290,16 @@ def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
         return pd.DataFrame(columns=COLUMNAS_ESTANDAR)
 
     filas = []
+    descartados_por_entidad = 0
     for r in registros:
         descripcion = r.get(col["descripcion"], "") or ""
         if not any(p in descripcion.lower() for p in PALABRAS_CLAVE):
             continue  # filtro de palabras clave, hecho en Python
+
+        entidad_nombre = (r.get(col["entidad"], "") or "").upper()
+        if not any(t in entidad_nombre for t in ("ALCALD", "CONCEJO", "MUNICIPIO")):
+            descartados_por_entidad += 1
+            continue  # criterio: solo alcaldías y concejos municipales
 
         fecha_pub = pd.to_datetime(r.get(col["fecha_publicacion"]), errors="coerce")
         fecha_cierre = pd.to_datetime(r.get(col["fecha_cierre"]), errors="coerce")
@@ -219,7 +323,8 @@ def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
             "Score_Relevancia": calcular_score(descripcion, presupuesto, dias_restantes),
         })
 
-    print(f"[SECOP] {len(filas)} de esos {len(registros)} coincidieron con las palabras clave de INCODARIEN.")
+    print(f"[SECOP] {len(filas)} de esos {len(registros)} coincidieron con las palabras clave Y son alcaldía/concejo "
+          f"({descartados_por_entidad} tenían palabra clave pero no eran alcaldía/concejo, se descartaron).")
     return pd.DataFrame(filas, columns=COLUMNAS_ESTANDAR) if filas else pd.DataFrame(columns=COLUMNAS_ESTANDAR)
 
 
@@ -279,12 +384,17 @@ def construir_dataset():
         print(f"[construir_dataset] Falló SECOP: {e}")
         df_secop = pd.DataFrame(columns=COLUMNAS_ESTANDAR)
     try:
+        df_web = buscar_menciones_web()
+    except Exception as e:
+        print(f"[construir_dataset] Falló búsqueda web: {e}")
+        df_web = pd.DataFrame(columns=COLUMNAS_ESTANDAR)
+    try:
         df_priv = cargar_leads_privados()
     except Exception as e:
         print(f"[construir_dataset] Falló CSV de leads privados: {e}")
         df_priv = pd.DataFrame(columns=COLUMNAS_ESTANDAR)
 
-    data = pd.concat([df_secop, df_priv], ignore_index=True)
+    data = pd.concat([df_secop, df_web, df_priv], ignore_index=True)
     if data.empty:
         return data
 
@@ -409,7 +519,6 @@ def grafico_distribucion_sector(df):
 # 8. APP DASH
 # ==========================================================
 app = dash.Dash(__name__)
-server = app.server
 app.title = "INCODARIEN — Inteligencia Comercial B2B"
 
 # CSS global inyectado directamente en el <head> del HTML, con !important.
@@ -451,10 +560,16 @@ TARJETA = {"backgroundColor": FONDO, "padding": "18px", "borderRadius": "14px", 
 app.layout = html.Div(style={"backgroundColor": "#10131F", "color": "#FFFFFF", "padding": "24px",
                               "fontFamily": "Segoe UI, Roboto, Arial, sans-serif"}, children=[
     dcc.Store(id="store-datos", data=[]),  # lista de diccionarios — NUNCA un string JSON
+    dcc.Store(id="store-trm", data=None),
+    dcc.Download(id="descarga-excel"),
     dcc.Interval(id="intervalo-refresco", interval=INTERVALO_REFRESCO_MS, n_intervals=0),
+    dcc.Interval(id="intervalo-trm", interval=6 * 60 * 60 * 1000, n_intervals=0),  # TRM cada 6 horas
 
     html.Div([
-        html.H1("INCODARIEN — Inteligencia Comercial B2B", style={"color": "#3B8BFF", "marginBottom": "6px"}),
+        html.Div([
+            html.H1("INCODARIEN — Inteligencia Comercial B2B", style={"color": "#3B8BFF", "marginBottom": "6px", "display": "inline-block"}),
+            html.Div(id="widget-trm", style={"display": "inline-block", "float": "right", "textAlign": "right"}),
+        ]),
         html.P(id="texto-estado", style={"color": "#8A92A6", "fontSize": "13px"}),
     ], style={"marginBottom": "20px"}),
 
@@ -482,6 +597,22 @@ def refrescar_datos(_):
     except Exception as e:
         print(f"[refrescar_datos] Error inesperado: {e}")
         return []
+
+
+@app.callback(Output("store-trm", "data"), Input("intervalo-trm", "n_intervals"))
+def refrescar_trm(_):
+    return obtener_trm()
+
+
+@app.callback(Output("widget-trm", "children"), Input("store-trm", "data"))
+def mostrar_trm(trm):
+    if not trm:
+        return html.Div("TRM: no disponible por ahora", style={"color": "#8A92A6", "fontSize": "12px"})
+    return html.Div([
+        html.Span("TRM hoy (USD/COP): ", style={"color": "#8A92A6", "fontSize": "12px"}),
+        html.Span(f"$ {trm['valor']:,.2f}", style={"color": "#33D19A", "fontWeight": "bold", "fontSize": "16px"}),
+        html.Span(f"  (vigente hasta {trm['vigencia']})", style={"color": "#8A92A6", "fontSize": "11px"}),
+    ])
 
 
 def _leer_store(store_data):
@@ -549,10 +680,17 @@ def render_tab(tab, store_data):
         return html.Div([
             _fila_kpis(df),
             html.Div([
-                html.Label("Filtrar por ubicación:", style={"fontWeight": "bold"}),
-                dcc.Dropdown(id="filtro-ubicacion",
-                             options=[{"label": "Todas", "value": "ALL"}] + [{"label": u, "value": u} for u in ubicaciones],
-                             value="ALL", clearable=False, style={"color": "#10131F", "width": "300px"}),
+                html.Div([
+                    html.Label("Filtrar por ubicación:", style={"fontWeight": "bold"}),
+                    dcc.Dropdown(id="filtro-ubicacion",
+                                 options=[{"label": "Todas", "value": "ALL"}] + [{"label": u, "value": u} for u in ubicaciones],
+                                 value="ALL", clearable=False, style={"color": "#10131F", "width": "300px"}),
+                ], style={"display": "inline-block", "verticalAlign": "bottom"}),
+                html.Button("📥 Exportar a Excel", id="btn-exportar-excel", n_clicks=0,
+                            style={"backgroundColor": "#1A1E2E", "color": "#33D19A", "border": "1px solid #33D19A",
+                                   "borderRadius": "8px", "padding": "10px 16px", "fontWeight": "bold",
+                                   "cursor": "pointer", "fontSize": "13px", "marginLeft": "20px",
+                                   "display": "inline-block", "verticalAlign": "bottom"}),
             ], style={"marginBottom": "20px"}),
             html.Div([
                 html.Div([dcc.Graph(id="g-tendencia")], style={"width": "49%", "display": "inline-block", **TARJETA}),
@@ -762,6 +900,27 @@ def registrar_lead(n, empresa, sector, ubicacion, proyecto, presupuesto, enlace,
         return html.Span(f"❌ Error al guardar: {e}", style={"color": "#f87171"})
 
 
+@app.callback(
+    Output("descarga-excel", "data"),
+    Input("btn-exportar-excel", "n_clicks"),
+    State("store-datos", "data"),
+    prevent_initial_call=True,
+)
+def exportar_excel(n, store_data):
+    df = _leer_store(store_data)
+    if df.empty:
+        df = pd.DataFrame(columns=COLUMNAS_ESTANDAR)
+    # Quitar zona horaria / tipos que openpyxl no acepta directamente
+    df_export = df.copy()
+    for c in ("Fecha_Publicacion", "Fecha_Cierre"):
+        if c in df_export.columns:
+            df_export[c] = df_export[c].astype(str)
+    nombre_archivo = f"procesos_incodarien_{datetime.now():%Y%m%d_%H%M}.xlsx"
+    return dcc.send_data_frame(df_export.to_excel, nombre_archivo, index=False, sheet_name="Procesos")
+
+
 if __name__ == "__main__":
     puerto = int(os.environ.get("PORT", 8050))
     app.run(debug=False, host="0.0.0.0", port=puerto)
+
+
