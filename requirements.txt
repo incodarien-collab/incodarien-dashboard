@@ -1,5 +1,6 @@
-    dash>=2.17
-    plotly>=5.20
-    pandas>=2.2
-    requests>=2.31
-    gunicorn>=21.2
+dash>=2.17
+plotly>=5.20
+pandas>=2.2
+requests>=2.31
+gunicorn>=21.2
+openpyxl>=3.1
