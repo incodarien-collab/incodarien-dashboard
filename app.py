@@ -519,6 +519,7 @@ def grafico_distribucion_sector(df):
 # 8. APP DASH
 # ==========================================================
 app = dash.Dash(__name__)
+server = app.server  # necesario para gunicorn en Render: gunicorn app:server
 app.title = "INCODARIEN — Inteligencia Comercial B2B"
 
 # CSS global inyectado directamente en el <head> del HTML, con !important.
@@ -922,5 +923,3 @@ def exportar_excel(n, store_data):
 if __name__ == "__main__":
     puerto = int(os.environ.get("PORT", 8050))
     app.run(debug=False, host="0.0.0.0", port=puerto)
-
-
