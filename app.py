@@ -409,6 +409,7 @@ def grafico_distribucion_sector(df):
 # 8. APP DASH
 # ==========================================================
 app = dash.Dash(__name__)
+server = app.server
 app.title = "INCODARIEN — Inteligencia Comercial B2B"
 
 # CSS global inyectado directamente en el <head> del HTML, con !important.
