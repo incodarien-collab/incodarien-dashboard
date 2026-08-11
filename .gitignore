@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.env
+leads_privados_verificados.csv
+*.bak
