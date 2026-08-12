@@ -49,7 +49,7 @@ import requests
 # ==========================================================
 # CONFIGURACIÓN
 # ==========================================================
-VERSION_APP = "10.0.0"
+VERSION_APP = "11.0.0"
 print(f"\n{'='*60}\nINCODARIEN Dashboard — VERSIÓN {VERSION_APP}\n"
       f"Si en el navegador no ves 'v{VERSION_APP}' en la esquina inferior "
       f"del dashboard, NO estás corriendo este archivo — revisa cuál "
@@ -140,6 +140,7 @@ COLUMNAS_SECOP = {
     # 'urlproceso' no es texto plano — es un diccionario {'url': '...'};
     # se extrae con una función aparte (ver extraer_url_proceso).
     "url": "urlproceso",
+    "estado": "estado_del_procedimiento",
 }
 # NOTA: el diagnóstico en vivo confirmó que este dataset NO TIENE ningún
 # campo de fecha de cierre/recepción de ofertas (ni con ese nombre ni con
@@ -356,7 +357,20 @@ def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
     filas = []
     descartados_por_municipio = 0
     descartados_por_entidad = 0
+    descartados_por_cerrado = 0
+    conteo_por_departamento = {}
+    # Palabras que indican que el proceso ya no admite ofertas nuevas. El
+    # dataset NO tiene un campo de "fecha límite para presentar oferta"
+    # (se verificó contra el volcado completo de columnas reales) — esto
+    # es lo más cerca que podemos llegar honestamente a "todavía se puede
+    # participar": excluir lo que el propio estado ya marca como cerrado.
+    # Para la fecha límite exacta, hay que abrir el enlace al proceso.
+    ESTADOS_CERRADOS = ("ADJUDICAD", "CERRADO", "TERMINAD", "CANCELAD", "LIQUIDAD", "DESIERTO", "FALLID")
+
     for r in registros:
+        depto = r.get(col["departamento"], "Sin departamento")
+        conteo_por_departamento[depto] = conteo_por_departamento.get(depto, 0) + 1
+
         ciudad = (r.get(col["municipio"], "") or "").lower()
         coincide_municipio = any(m.lower() in ciudad or ciudad in m.lower() for m in TODOS_LOS_MUNICIPIOS_PRINCIPALES)
         if not coincide_municipio:
@@ -378,6 +392,11 @@ def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
             descartados_por_entidad += 1
             continue  # criterio ampliado: gobierno local/departamental, salud y educación pública
 
+        estado_nombre = (r.get(col["estado"], "") or "").upper()
+        if any(cerrado in estado_nombre for cerrado in ESTADOS_CERRADOS):
+            descartados_por_cerrado += 1
+            continue  # proxy de "ya no se puede ofertar" (no hay fecha de cierre exacta en el dataset)
+
         fecha_pub = pd.to_datetime(r.get(col["fecha_publicacion"]), errors="coerce")
         presupuesto = pd.to_numeric(r.get(col["precio_base"]), errors="coerce")
         enlace = extraer_url_proceso(r.get(col["url"]))
@@ -391,16 +410,17 @@ def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
             "Fuente": "SECOP II (API oficial, dato público)",
             "Presupuesto_COP": presupuesto,
             "Fecha_Publicacion": fecha_pub,
-            "Fecha_Cierre": None,  # el dataset no tiene este campo
+            "Fecha_Cierre": None,  # el dataset no tiene este campo — verificar en el enlace al proceso
             "Enlace_Proceso": enlace,
             "Enlace_Verificado": verificar_enlace(enlace),
             "Contacto": "Ver datos de contacto en la ficha oficial del proceso (enlace)",
             "Score_Relevancia": calcular_score(descripcion, presupuesto, dias_restantes=None),
         })
 
+    print(f"[SECOP] Desglose por departamento (procesos crudos antes de filtrar): {conteo_por_departamento}")
     print(f"[SECOP] De {len(registros)} procesos crudos: {descartados_por_municipio} no eran de un municipio "
           f"principal del alcance, {descartados_por_entidad} tenían palabra clave pero no eran del tipo de "
-          f"entidad aceptado (alcaldía/concejo/gobernación/hospital público/institución educativa), "
+          f"entidad aceptado, {descartados_por_cerrado} ya estaban en estado cerrado/adjudicado/cancelado, "
           f"y quedaron {len(filas)} procesos válidos.")
     return pd.DataFrame(filas, columns=COLUMNAS_ESTANDAR) if filas else pd.DataFrame(columns=COLUMNAS_ESTANDAR)
 
