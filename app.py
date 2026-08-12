@@ -49,7 +49,7 @@ import requests
 # ==========================================================
 # CONFIGURACIÓN
 # ==========================================================
-VERSION_APP = "9.0.0"
+VERSION_APP = "10.0.0"
 print(f"\n{'='*60}\nINCODARIEN Dashboard — VERSIÓN {VERSION_APP}\n"
       f"Si en el navegador no ves 'v{VERSION_APP}' en la esquina inferior "
       f"del dashboard, NO estás corriendo este archivo — revisa cuál "
@@ -76,12 +76,28 @@ DEPARTAMENTOS_OBJETIVO = [
 # municipios — no a todo el departamento — para mantener el volumen de
 # resultados relevante para el tamaño de INCODARIEN.
 MUNICIPIOS_PRINCIPALES = {
-    "Antioquia": ["Medellín", "Apartadó", "Turbo", "Rionegro", "Bello", "Itagüí", "Envigado", "Carepa", "Chigorodó", "Necoclí"],
-    "Cundinamarca": ["Bogotá D.C.", "Soacha", "Zipaquirá", "Facatativá", "Chía", "Girardot"],
-    "Valle del Cauca": ["Cali", "Buenaventura", "Palmira", "Tuluá", "Cartago"],
-    "Atlántico": ["Barranquilla", "Soledad", "Malambo", "Sabanalarga"],
-    "Bolívar": ["Cartagena", "Magangué", "Turbaco", "Arjona"],
-    "Córdoba": ["Montería", "Cereté", "Sahagún", "Lorica"],
+    "Antioquia": [
+        "Medellín", "Apartadó", "Turbo", "Rionegro", "Bello", "Itagüí", "Envigado", "Carepa", "Chigorodó",
+        "Necoclí", "Arboletes", "San Pedro de Urabá", "Mutatá", "Vigía del Fuerte", "Murindó",
+        "Caucasia", "Copacabana", "Sabaneta", "La Estrella", "Girardota", "Marinilla", "El Santuario",
+        "Santa Fe de Antioquia", "Yarumal", "Andes", "Segovia",
+    ],
+    "Cundinamarca": [
+        "Bogotá D.C.", "Bogotá", "Soacha", "Zipaquirá", "Facatativá", "Chía", "Girardot", "Fusagasugá",
+        "Mosquera", "Madrid", "Funza", "Cajicá", "Ubaté", "Chocontá",
+    ],
+    "Valle del Cauca": [
+        "Cali", "Buenaventura", "Palmira", "Tuluá", "Cartago", "Buga", "Jamundí", "Yumbo", "Zarzal",
+    ],
+    "Atlántico": [
+        "Barranquilla", "Soledad", "Malambo", "Sabanalarga", "Puerto Colombia", "Baranoa", "Galapa",
+    ],
+    "Bolívar": [
+        "Cartagena", "Magangué", "Turbaco", "Arjona", "El Carmen de Bolívar", "Mompós", "Santa Rosa",
+    ],
+    "Córdoba": [
+        "Montería", "Cereté", "Sahagún", "Lorica", "Tierralta", "Planeta Rica", "Montelíbano",
+    ],
 }
 TODOS_LOS_MUNICIPIOS_PRINCIPALES = [m for lista in MUNICIPIOS_PRINCIPALES.values() for m in lista]
 
@@ -352,9 +368,15 @@ def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
             continue  # filtro de palabras clave, hecho en Python
 
         entidad_nombre = (r.get(col["entidad"], "") or "").upper()
-        if not any(t in entidad_nombre for t in ("ALCALD", "CONCEJO", "MUNICIPIO")):
+        tipos_entidad_aceptados = (
+            "ALCALD", "CONCEJO", "MUNICIPIO",           # gobierno local (criterio original)
+            "GOBERNACION", "GOBERNACIÓN",                # gobierno departamental
+            "HOSPITAL", "E.S.E", "ESE ", " ESE",         # salud pública
+            "INSTITUCION EDUCATIVA", "INSTITUCIÓN EDUCATIVA", "COLEGIO",  # educación pública
+        )
+        if not any(t in entidad_nombre for t in tipos_entidad_aceptados):
             descartados_por_entidad += 1
-            continue  # criterio: solo alcaldías y concejos municipales
+            continue  # criterio ampliado: gobierno local/departamental, salud y educación pública
 
         fecha_pub = pd.to_datetime(r.get(col["fecha_publicacion"]), errors="coerce")
         presupuesto = pd.to_numeric(r.get(col["precio_base"]), errors="coerce")
@@ -377,7 +399,8 @@ def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
         })
 
     print(f"[SECOP] De {len(registros)} procesos crudos: {descartados_por_municipio} no eran de un municipio "
-          f"principal del alcance, {descartados_por_entidad} tenían palabra clave pero no eran alcaldía/concejo, "
+          f"principal del alcance, {descartados_por_entidad} tenían palabra clave pero no eran del tipo de "
+          f"entidad aceptado (alcaldía/concejo/gobernación/hospital público/institución educativa), "
           f"y quedaron {len(filas)} procesos válidos.")
     return pd.DataFrame(filas, columns=COLUMNAS_ESTANDAR) if filas else pd.DataFrame(columns=COLUMNAS_ESTANDAR)
 
