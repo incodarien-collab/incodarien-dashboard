@@ -49,7 +49,7 @@ import requests
 # ==========================================================
 # CONFIGURACIÓN
 # ==========================================================
-VERSION_APP = "8.0.0"
+VERSION_APP = "9.0.0"
 print(f"\n{'='*60}\nINCODARIEN Dashboard — VERSIÓN {VERSION_APP}\n"
       f"Si en el navegador no ves 'v{VERSION_APP}' en la esquina inferior "
       f"del dashboard, NO estás corriendo este archivo — revisa cuál "
@@ -63,7 +63,13 @@ CSV_LEADS_PRIVADOS = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "leads_privados_verificados.csv"),
 )
 
-DEPARTAMENTOS_OBJETIVO = ["Antioquia", "Cundinamarca", "Valle del Cauca", "Atlántico", "Bolívar", "Córdoba"]
+DEPARTAMENTOS_OBJETIVO = [
+    "Antioquia", "Cundinamarca", "Valle del Cauca", "Atlántico", "Bolívar", "Córdoba",
+    # CONFIRMADO en vivo: las entidades de Bogotá reportan su departamento
+    # como "Distrito Capital de Bogotá", NO como "Cundinamarca" — son
+    # valores distintos en este dataset.
+    "Distrito Capital de Bogotá",
+]
 
 # Municipios principales por departamento del alcance. El criterio de
 # búsqueda en SECOP se limita a la ENTIDAD (alcaldías y concejos) de estos
@@ -103,18 +109,35 @@ COLUMNAS_SECOP = {
     "entidad": "entidad",
     "departamento": "departamento_entidad",
     "municipio": "ciudad_entidad",
-    # Antes decía "detalle_del_objeto_a_contratar" — ese campo no existe en
-    # el dataset real; por eso siempre llegaba vacío y el filtro de
-    # palabras clave nunca encontraba nada (0 resultados, sin error).
-    "descripcion": "descripcion_del_procedimiento",
-    # Antes decía "fecha_de_publicacion_del" (incompleto).
-    "fecha_publicacion": "fecha_de_publicacion_del_proceso",
-    # Antes decía "fecha_de_recepcion_de_ofertas" (nombre real distinto).
-    "fecha_cierre": "fecha_de_recepcion_de_respuestas",
+    # CONFIRMADO en vivo el 12/ago/2026 con diagnostico_secop_sin_filtros():
+    # el campo real es 'descripci_n_del_procedimiento' (así, Socrata generó
+    # el nombre raro a partir de "Descripción..."). "descripcion_del_procedimiento"
+    # (lo que puse en v6/v7) NUNCA existió.
+    "descripcion": "descripci_n_del_procedimiento",
+    # CONFIRMADO: el campo correcto es 'fecha_de_publicacion_del' (sin
+    # "_proceso" al final). Estaba bien en v3-v6; lo dañé al "corregirlo"
+    # sin verificar en v7. Lección: cambiar solo lo que el diagnóstico
+    # confirma, nunca lo que "parece más completo".
+    "fecha_publicacion": "fecha_de_publicacion_del",
     "modalidad": "modalidad_de_contratacion",
     "precio_base": "precio_base",
+    # 'urlproceso' no es texto plano — es un diccionario {'url': '...'};
+    # se extrae con una función aparte (ver extraer_url_proceso).
     "url": "urlproceso",
 }
+# NOTA: el diagnóstico en vivo confirmó que este dataset NO TIENE ningún
+# campo de fecha de cierre/recepción de ofertas (ni con ese nombre ni con
+# otro parecido). Se quitó por completo — inventar una columna que no
+# existe solo genera otro "<<< ESTE CAMPO NO EXISTE >>>" silencioso.
+
+
+def extraer_url_proceso(valor):
+    """El campo urlproceso llega como {'url': 'https://...'} en la mayoría
+    de los registros, pero por seguridad también se acepta si alguna vez
+    llega como texto plano."""
+    if isinstance(valor, dict):
+        return valor.get("url", "") or ""
+    return valor or ""
 
 EMPRESA = {
     "razon_social": "Inversiones y Comunicaciones Darién ZOMAC S.A.S.",
@@ -225,10 +248,14 @@ def buscar_menciones_web(limite_terminos=8):
 
     filas = []
     terminos = PALABRAS_CLAVE[:limite_terminos]  # límite para no agotar la cuota diaria gratis
+    ya_se_mostro_el_error_completo = False
     for termino in terminos:
         try:
             params = {"key": api_key, "cx": cx, "q": f"licitación {termino} Urabá Antioquia", "num": 3}
             resp = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=10)
+            if resp.status_code >= 400 and not ya_se_mostro_el_error_completo:
+                print(f"[BUSQUEDA WEB] {resp.status_code} — {resp.text[:500]}")
+                ya_se_mostro_el_error_completo = True  # el mismo error se repetiría en cada término, basta 1 vez
             resp.raise_for_status()
             items = resp.json().get("items", [])
         except Exception as e:
@@ -284,17 +311,17 @@ def diagnostico_secop_sin_filtros():
 
 
 def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
-    """Filtra por municipio (solo los municipios principales de cada
-    departamento del alcance) y por fecha en el servidor; el filtro de
-    palabras clave y de tipo de entidad (alcaldía/concejo) se hace en
-    Python sobre el resultado, para no depender de escapar bien comillas
-    con tildes dentro de un $where."""
+    """Filtra por departamento (server-side, es el campo más estable) y por
+    fecha; el filtro de municipio se hace en Python de forma flexible
+    (ej. 'Bogotá' coincide con 'Bogotá D.C.'), porque comparar ciudades con
+    tildes/abreviaturas con un '=' exacto en SoQL es frágil. El filtro de
+    palabras clave y de tipo de entidad también se hace en Python."""
     diagnostico_secop_sin_filtros()
 
     col = COLUMNAS_SECOP
     fecha_limite = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%dT00:00:00")
-    filtro_municipios = " OR ".join([f"{col['municipio']} = '{m}'" for m in TODOS_LOS_MUNICIPIOS_PRINCIPALES])
-    where = f"({filtro_municipios}) AND {col['fecha_publicacion']} >= '{fecha_limite}'"
+    filtro_departamentos = " OR ".join([f"{col['departamento']} = '{d}'" for d in DEPARTAMENTOS_OBJETIVO])
+    where = f"({filtro_departamentos}) AND {col['fecha_publicacion']} >= '{fecha_limite}'"
 
     params = {"$where": where, "$limit": limite, "$order": f"{col['fecha_publicacion']} DESC"}
     headers = {"X-App-Token": SOCRATA_APP_TOKEN} if SOCRATA_APP_TOKEN else {}
@@ -302,22 +329,24 @@ def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
     try:
         resp = requests.get(SECOP_ENDPOINT, params=params, headers=headers, timeout=20)
         if resp.status_code >= 400:
-            # Se imprime el cuerpo real del error de Socrata para poder
-            # diagnosticar en el futuro sin adivinar.
             print(f"[SECOP] {resp.status_code} — {resp.text[:500]}")
             return pd.DataFrame(columns=COLUMNAS_ESTANDAR)
         registros = resp.json()
-        print(f"[SECOP] La API devolvió {len(registros)} procesos crudos (antes del filtro de palabras clave).")
-        if registros and col["descripcion"] not in registros[0]:
-            print(f"[SECOP] AVISO: el campo '{col['descripcion']}' no aparece en la respuesta. "
-                  f"Campos disponibles: {list(registros[0].keys())}")
+        print(f"[SECOP] La API devolvió {len(registros)} procesos crudos (antes de filtrar municipio/palabras clave).")
     except Exception as e:
         print(f"[SECOP] Consulta no disponible en este momento: {e}")
         return pd.DataFrame(columns=COLUMNAS_ESTANDAR)
 
     filas = []
+    descartados_por_municipio = 0
     descartados_por_entidad = 0
     for r in registros:
+        ciudad = (r.get(col["municipio"], "") or "").lower()
+        coincide_municipio = any(m.lower() in ciudad or ciudad in m.lower() for m in TODOS_LOS_MUNICIPIOS_PRINCIPALES)
+        if not coincide_municipio:
+            descartados_por_municipio += 1
+            continue
+
         descripcion = r.get(col["descripcion"], "") or ""
         if not any(p in descripcion.lower() for p in PALABRAS_CLAVE):
             continue  # filtro de palabras clave, hecho en Python
@@ -328,10 +357,8 @@ def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
             continue  # criterio: solo alcaldías y concejos municipales
 
         fecha_pub = pd.to_datetime(r.get(col["fecha_publicacion"]), errors="coerce")
-        fecha_cierre = pd.to_datetime(r.get(col["fecha_cierre"]), errors="coerce")
-        dias_restantes = (fecha_cierre - datetime.now()).days if pd.notna(fecha_cierre) else None
         presupuesto = pd.to_numeric(r.get(col["precio_base"]), errors="coerce")
-        enlace = r.get(col["url"], "") or ""
+        enlace = extraer_url_proceso(r.get(col["url"]))
 
         filas.append({
             "Empresa": r.get(col["entidad"], "Entidad no especificada"),
@@ -342,15 +369,16 @@ def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
             "Fuente": "SECOP II (API oficial, dato público)",
             "Presupuesto_COP": presupuesto,
             "Fecha_Publicacion": fecha_pub,
-            "Fecha_Cierre": fecha_cierre,
+            "Fecha_Cierre": None,  # el dataset no tiene este campo
             "Enlace_Proceso": enlace,
             "Enlace_Verificado": verificar_enlace(enlace),
             "Contacto": "Ver datos de contacto en la ficha oficial del proceso (enlace)",
-            "Score_Relevancia": calcular_score(descripcion, presupuesto, dias_restantes),
+            "Score_Relevancia": calcular_score(descripcion, presupuesto, dias_restantes=None),
         })
 
-    print(f"[SECOP] {len(filas)} de esos {len(registros)} coincidieron con las palabras clave Y son alcaldía/concejo "
-          f"({descartados_por_entidad} tenían palabra clave pero no eran alcaldía/concejo, se descartaron).")
+    print(f"[SECOP] De {len(registros)} procesos crudos: {descartados_por_municipio} no eran de un municipio "
+          f"principal del alcance, {descartados_por_entidad} tenían palabra clave pero no eran alcaldía/concejo, "
+          f"y quedaron {len(filas)} procesos válidos.")
     return pd.DataFrame(filas, columns=COLUMNAS_ESTANDAR) if filas else pd.DataFrame(columns=COLUMNAS_ESTANDAR)
 
 
