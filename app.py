@@ -49,7 +49,7 @@ import requests
 # ==========================================================
 # CONFIGURACIÓN
 # ==========================================================
-VERSION_APP = "7.0.0"
+VERSION_APP = "8.0.0"
 print(f"\n{'='*60}\nINCODARIEN Dashboard — VERSIÓN {VERSION_APP}\n"
       f"Si en el navegador no ves 'v{VERSION_APP}' en la esquina inferior "
       f"del dashboard, NO estás corriendo este archivo — revisa cuál "
@@ -259,12 +259,38 @@ def buscar_menciones_web(limite_terminos=8):
 # ==========================================================
 # 3. SECOP II — consulta simple (sin LIKE, sin % que se pueda romper)
 # ==========================================================
+def diagnostico_secop_sin_filtros():
+    """Trae 3 registros CUALQUIERA del dataset, sin ningún $where, y
+    muestra sus campos y valores reales. Esto existe porque ya nos
+    equivocamos dos veces adivinando nombres de columna — en vez de seguir
+    adivinando, esto imprime la verdad directamente desde la fuente."""
+    try:
+        headers = {"X-App-Token": SOCRATA_APP_TOKEN} if SOCRATA_APP_TOKEN else {}
+        resp = requests.get(SECOP_ENDPOINT, params={"$limit": 3}, headers=headers, timeout=20)
+        if resp.status_code >= 400:
+            print(f"[DIAGNOSTICO SECOP] {resp.status_code} — {resp.text[:500]}")
+            return
+        registros = resp.json()
+        if not registros:
+            print("[DIAGNOSTICO SECOP] El dataset respondió pero está vacío (sin ningún registro).")
+            return
+        print(f"[DIAGNOSTICO SECOP] Campos reales disponibles: {sorted(registros[0].keys())}")
+        col = COLUMNAS_SECOP
+        for campo_logico, campo_real in col.items():
+            valor = registros[0].get(campo_real, "<<< ESTE CAMPO NO EXISTE EN LA RESPUESTA >>>")
+            print(f"[DIAGNOSTICO SECOP]   {campo_logico} → '{campo_real}' = {repr(valor)[:120]}")
+    except Exception as e:
+        print(f"[DIAGNOSTICO SECOP] No se pudo ejecutar el diagnóstico: {e}")
+
+
 def consultar_secop(dias=DIAS_ANTIGUEDAD_MAXIMA, limite=1000):
     """Filtra por municipio (solo los municipios principales de cada
     departamento del alcance) y por fecha en el servidor; el filtro de
     palabras clave y de tipo de entidad (alcaldía/concejo) se hace en
     Python sobre el resultado, para no depender de escapar bien comillas
     con tildes dentro de un $where."""
+    diagnostico_secop_sin_filtros()
+
     col = COLUMNAS_SECOP
     fecha_limite = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%dT00:00:00")
     filtro_municipios = " OR ".join([f"{col['municipio']} = '{m}'" for m in TODOS_LOS_MUNICIPIOS_PRINCIPALES])
@@ -572,6 +598,16 @@ app.layout = html.Div(style={"backgroundColor": "#10131F", "color": "#FFFFFF", "
             html.Div(id="widget-trm", style={"display": "inline-block", "float": "right", "textAlign": "right"}),
         ]),
         html.P(id="texto-estado", style={"color": "#8A92A6", "fontSize": "13px"}),
+        # El botón vive aquí, en la parte FIJA del layout (nunca se
+        # reconstruye) — por eso ya no se activa solo al cambiar de
+        # pestaña. Antes vivía dentro del contenido dinámico de la
+        # pestaña "Procesos y tendencias", y Dash lo trataba como un
+        # componente "nuevo" cada vez que esa pestaña se re-renderizaba,
+        # disparando su callback aunque nadie hiciera clic.
+        html.Button("📥 Exportar a Excel", id="btn-exportar-excel", n_clicks=0,
+                    style={"backgroundColor": "#1A1E2E", "color": "#33D19A", "border": "1px solid #33D19A",
+                           "borderRadius": "8px", "padding": "10px 16px", "fontWeight": "bold",
+                           "cursor": "pointer", "fontSize": "13px", "marginTop": "10px"}),
     ], style={"marginBottom": "20px"}),
 
     dcc.Tabs(id="tabs", value="tab-procesos", children=[
@@ -681,17 +717,10 @@ def render_tab(tab, store_data):
         return html.Div([
             _fila_kpis(df),
             html.Div([
-                html.Div([
-                    html.Label("Filtrar por ubicación:", style={"fontWeight": "bold"}),
-                    dcc.Dropdown(id="filtro-ubicacion",
-                                 options=[{"label": "Todas", "value": "ALL"}] + [{"label": u, "value": u} for u in ubicaciones],
-                                 value="ALL", clearable=False, style={"color": "#10131F", "width": "300px"}),
-                ], style={"display": "inline-block", "verticalAlign": "bottom"}),
-                html.Button("📥 Exportar a Excel", id="btn-exportar-excel", n_clicks=0,
-                            style={"backgroundColor": "#1A1E2E", "color": "#33D19A", "border": "1px solid #33D19A",
-                                   "borderRadius": "8px", "padding": "10px 16px", "fontWeight": "bold",
-                                   "cursor": "pointer", "fontSize": "13px", "marginLeft": "20px",
-                                   "display": "inline-block", "verticalAlign": "bottom"}),
+                html.Label("Filtrar por ubicación:", style={"fontWeight": "bold"}),
+                dcc.Dropdown(id="filtro-ubicacion",
+                             options=[{"label": "Todas", "value": "ALL"}] + [{"label": u, "value": u} for u in ubicaciones],
+                             value="ALL", clearable=False, style={"color": "#10131F", "width": "300px"}),
             ], style={"marginBottom": "20px"}),
             html.Div([
                 html.Div([dcc.Graph(id="g-tendencia")], style={"width": "49%", "display": "inline-block", **TARJETA}),
